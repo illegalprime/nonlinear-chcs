@@ -8,34 +8,83 @@ import decimal
 import os
 
 
+Z3 = """
+;; the comments here are an example of possible usage:
+;; the live variables are x and y
+{live-declare}
+
+;; they are modified and stored in x' and y'
+{prime-declare}
+
+;; such that x' = x + y and y' = y + 1
+{loop-body}
+
+;; and there is a function p(x, y)
+(define-fun p ({live-args}) Bool
+  {invariant}
+  )
+
+;; and it's true at the start of each loop iteration
+(assert (p {live-vars}))
+
+;; and there's a goal g(x, y)
+(define-fun g ({live-args}) Bool
+  {goal}
+  )
+
+;; we want p(x, y) to be true before the loop starts.
+;; if so, the head of the implication _must also_ be true.
+;; if the body is false then the whole thing is true (contradiction found).
+(assert (=> (and
+             (p {start-values})
+             )
+
+            ;; we'd like to find x and y that break the goal after the loop
+            ;; or break the goal if the loop were to never run
+            ;; ALSO one that would break the loop invariant.
+            ;; any of these will do, so we collect them in a dis-junction
+            (or
+             (not (p {prime-vars}))
+             (not (g {start-values}))
+             (not (g {prime-vars}))
+             )))
+
+(check-sat)
+;; if this system is true it'll produce a model which will refute our invariant
+;; we get those x and y values out to parse and try again
+(get-model)
+"""
+
+
 class Relation:
     def setup(self):
         self.syms = list(sorted(self.start.keys()))
         self.primer = re.compile('(%s)' % '|'.join(map(re.escape, self.syms)))
 
 
-    def logic(self, expr):
-        hypothesis = self.to_hypo(expr)
-        mk_assert = lambda a: '(assert %s)' % a
-        def mk_declare(sym):
-            return """
-            (declare-const {0} Int)
-            (declare-const {0}p Int)
-            """.format(sym)
-        return """
-        {declare}
+    def logic(self, hypothesis):
+        primesyms = list(map(self.prime, self.syms))
+        starts = map(lambda s: str(self.start[s]), self.syms)
+        def mk_loop(pair):
+            var, expr = pair
+            return '(assert (= {} {}))'.format(self.prime(var), expr)
 
-        (assert {prerel})
-        {asserts}
-        (assert (not {postrel}))
+        def mk_declare(var):
+            return '(declare-const {} Int)'.format(var)
 
-        (check-sat)
-        (get-model)
-        """.format(**{
-            'declare': '\n'.join(map(mk_declare, self.syms)),
-            'asserts': '\n'.join(map(mk_assert, self.asserts + [ self.goal ])),
-            'prerel': hypothesis['prerel'],
-            'postrel': hypothesis['postrel'],
+        def mk_arg(var):
+            return '({} Int)'.format(var)
+
+        return Z3.format(**{
+            'live-declare': '\n'.join(map(mk_declare, self.syms)),
+            'live-vars': ' '.join(self.syms),
+            'live-args': ' '.join(map(mk_arg, self.syms)),
+            'prime-declare': '\n'.join(map(mk_declare, primesyms)),
+            'prime-vars': ' '.join(primesyms),
+            'start-values': ' '.join(starts),
+            'loop-body': '\n'.join(map(mk_loop, self.loop.items())),
+            'invariant': hypothesis,
+            'goal': self.goal,
         })
 
     def positive_points(self):
@@ -47,6 +96,7 @@ class Relation:
 
     def negative_point(self, expr):
         logic = self.logic(expr)
+        logger.debug(logic)
         status = run(['z3', '-in'], input=logic, encoding='utf8', stdout=PIPE)
         status = status.stdout.splitlines()
         if status[0] != 'sat':
@@ -66,22 +116,18 @@ class Relation:
         return point
 
 
-    def to_hypo(self, expr):
-        return {
-            'prerel': expr,
-            'postrel': self.primer.sub('\\1p', expr),
-        }
+    def prime(self, expr):
+        return self.primer.sub('\\1p', expr)
 
 
 class SimpleRelation(Relation):
     def __init__(self, goal):
         self.goal = goal
         self.start = { 'x': 1, 'y': 0 }
-        self.start_logic = '(and (= x 1) (= y 0))' # TODO: when do we need this?
-        self.asserts = [
-            '(= xp (+ x y))',
-            '(= yp (+ y 1))',
-        ]
+        self.loop = {
+            'x': '(+ x y)',
+            'y': '(+ y 1)',
+        }
         self.setup()
 
     def script(self, *, x, y):
@@ -95,10 +141,10 @@ class QuadraticRelation(Relation):
     def __init__(self, goal):
         self.goal = goal
         self.start = { 'x': 0, 'y': 0 }
-        self.asserts = [
-            '(= xp (+ x 1))',
-            '(= yp (* (+ x 1) (+ x 1)))',
-        ]
+        self.loop = {
+            'x': '(+ x 1)',
+            'y': '(* (+ x 1) (+ x 1))',
+        }
         self.setup()
 
     def script(self, *, x, y):
@@ -112,10 +158,10 @@ class ModuloRelation(Relation):
     def __init__(self, goal):
         self.goal = goal
         self.start = { 'x': 0, 'y': 0 }
-        self.asserts = [
-            '(= xp (+ x 2))',
-            '(= yp (+ y 1))',
-        ]
+        self.loop = {
+            'x': '(+ x 2)',
+            'y': '(+ y 1)',
+        }
         self.setup()
 
     def script(self, *, x, y):
@@ -224,34 +270,29 @@ def loop(relation):
 
     # get seed positive points
     positive_gen = relation.positive_points()
-    positives = [ to_lst(next(positive_gen)) for _ in range(10) ]
-
-    # get an initial negative point (just try the goal)
     goal = relation.goal
-    counterexample = relation.negative_point(goal)
-    if counterexample == 'unsat':
-        return (True, goal)
-    negatives = [ to_lst(counterexample) ]
+    positives = []
+    negatives = []
 
     while True:
-        logger.debug('hypothesis ' + goal)
-        logger.debug('negatives ' + str(list(map(tuple, negatives))))
+        if len(negatives) > 0:
+            logger.debug('hypothesis ' + goal)
+            logger.debug('negatives ' + str(list(map(tuple, negatives))))
 
-        # Gather data
-        y = [ 1 for _ in positives ] + [ -1 for _ in negatives ]
-        X = positives + negatives
+            # Gather data
+            y = [ 1 for _ in positives ] + [ -1 for _ in negatives ]
+            X = positives + negatives
 
-        # Train a tree of linear separators (to get 100% accuracy)
-        clf = tree.DecisionTreeClassifier()
-        clf.fit(X, y)
+            # Train a tree of linear separators (to get 100% accuracy)
+            clf = tree.DecisionTreeClassifier()
+            clf.fit(X, y)
 
-        # Get the boxes into a z3 expressions
-        goal = tree_to_z3(clf, relation.syms)
+            # Get the boxes into a z3 expressions
+            goal = tree_to_z3(clf, relation.syms)
 
-        # Make a pretty graph
-        if 'INTERACTIVE' in os.environ:
+            # Make a pretty graph
             visualize_2d(clf, X, y, goal)
-            input()
+            if 'INTERACTIVE' in os.environ: input()
 
         # Give line to the oracle and to see if its correct
         counterexample = relation.negative_point(goal)
@@ -277,23 +318,33 @@ def loop(relation):
             return (False, contradictions) # return unsafe witness
 
 
-if 'DEBUG' in os.environ:
-    logger.basicConfig(level=logger.DEBUG)
 
-# success, interpolant = loop(ModuloRelation('(= (mod x 2) 0)'))
-success, interpolant = loop(SimpleRelation('(>= x y)'))
+if __name__ == '__main__':
+    if 'DEBUG' in os.environ:
+        logger.basicConfig(level=logger.DEBUG)
 
-if success:
-    print('success', interpolant)
-else:
-    print('failure', interpolant)
+    class WeirdRelation(Relation):
+        def __init__(self, goal):
+            self.goal = goal
+            self.start = { 'x': 0, 'y': 1 }
+            self.loop = {
+                'x': 'y',
+                'y': '(+ x y)'
+            }
+            self.setup()
 
+        def script(self, *, x, y):
+            return {
+                'x': y,
+                'y': y + x,
+            }
 
-# N = [(0, 0), (1, -1), (3, -2), (4, -2), (7, -3), (8, -3), (12, -4), (13, -4), (14, -4), (15, -4)]
-# P = [(1, 0), (1,  1), (2,  2), (4,  3), (7,  4), (11, 5), (16,  6), (22,  7), (29,  8), (37,  9)]
-# y = [ 1 for _ in range(10) ] + [ -1 for _ in range(10) ]
-# X = P + N
-# clf = tree.DecisionTreeClassifier()
-# clf.fit(X, y)
-# visualize_2d(clf, X, y, 'first 10')
-# logger.debug(tree_to_z3(clf, ['x', 'y']))
+    # success, interpolant = loop(ModuloRelation('(= x (* y 2))'))
+    # success, interpolant = loop(SimpleRelation('(>= x y)'))
+    success, interpolant = loop(QuadraticRelation('(= y (* x x))'))
+    # success, interpolant = loop(WeirdRelation('(>= y x)'))
+
+    if success:
+        print('success', interpolant)
+    else:
+        print('failure', interpolant)

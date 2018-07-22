@@ -1,7 +1,7 @@
 with import <nixpkgs> {};
 
 stdenv.mkDerivation {
-  name = "env";
+  name = "chc";
 
   buildInputs = [
     z3
