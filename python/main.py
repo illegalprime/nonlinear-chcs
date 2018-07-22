@@ -49,6 +49,18 @@ Z3 = """
              (not (g {prime-vars}))
              )))
 
+;; TODO: sometimes we get back counter examples that overlap with + data
+;; this is just because of a poor choice of 'p', but we need to know
+;; when that's true or when the goal really is bad
+;; (assert (not (or (and (= x 0) (= y 0)))))
+;; (assert (= x y))
+
+;; TODO: sometimes our '-' p region covers yet to be determined '+' spots
+;; solutions: stop z3 from emitting a counter-example in the space (good)
+;;            generate positive examples until they surround counter (bad)
+;;            start z3 off at trivial p so it can't get too smart too soon (bad)
+;;            move examples from '-' to '+' when found (?)
+
 (check-sat)
 ;; if this system is true it'll produce a model which will refute our invariant
 ;; we get those x and y values out to parse and try again
@@ -102,7 +114,7 @@ class Relation:
         if status[0] != 'sat':
             return status[0]
 
-        point = { key: None for key in self.start.keys() }
+        point = { k: v for k, v in self.start.items() }
         model = loads(''.join(status[1:]))
         assert model[0].value() == 'model'
         for var in model[1:]:
@@ -160,14 +172,14 @@ class ModuloRelation(Relation):
         self.start = { 'x': 0, 'y': 0 }
         self.loop = {
             'x': '(+ x 2)',
-            'y': '(+ y 1)',
+            'y': '(+ y 2)',
         }
         self.setup()
 
     def script(self, *, x, y):
         return {
             'x': x + 2,
-            'y': y + 1,
+            'y': y + 2,
         }
 
 
@@ -269,14 +281,14 @@ def loop(relation):
                         sorted(obj.items(), key=lambda a: a[0])))
 
     # get seed positive points
+    interpolant = relation.goal
     positive_gen = relation.positive_points()
-    goal = relation.goal
     positives = []
     negatives = []
 
     while True:
         if len(negatives) > 0:
-            logger.debug('hypothesis ' + goal)
+            logger.debug('hypothesis ' + interpolant)
             logger.debug('negatives ' + str(list(map(tuple, negatives))))
 
             # Gather data
@@ -288,24 +300,25 @@ def loop(relation):
             clf.fit(X, y)
 
             # Get the boxes into a z3 expressions
-            goal = tree_to_z3(clf, relation.syms)
+            interpolant = tree_to_z3(clf, relation.syms)
 
             # Make a pretty graph
-            visualize_2d(clf, X, y, goal)
+            visualize_2d(clf, X, y, interpolant)
             if 'INTERACTIVE' in os.environ: input()
 
         # Give line to the oracle and to see if its correct
-        counterexample = relation.negative_point(goal)
+        counterexample = relation.negative_point(interpolant)
 
         if isinstance(counterexample, str):
             if counterexample == 'unsat':
-                return (True, goal) # no counterexamples, we're done!
+                return (True, interpolant) # no counterexamples, we're done!
             else:
                 raise Exception('unknown z3 exit line: ' + counterexample)
 
         # add counterexample to negative spots
         counterexample = to_lst(counterexample)
         if counterexample in negatives:
+            # we'll loop forever if we don't have a new counter-example
             raise Exception('already seen counter-example' + str(counterexample))
         negatives += [ counterexample ]
 
@@ -339,9 +352,9 @@ if __name__ == '__main__':
                 'y': y + x,
             }
 
-    # success, interpolant = loop(ModuloRelation('(= x (* y 2))'))
+    success, interpolant = loop(ModuloRelation('(not (= x 3))'))
     # success, interpolant = loop(SimpleRelation('(>= x y)'))
-    success, interpolant = loop(QuadraticRelation('(= y (* x x))'))
+    # success, interpolant = loop(QuadraticRelation('(= y (* x x))'))
     # success, interpolant = loop(WeirdRelation('(>= y x)'))
 
     if success:
