@@ -4,7 +4,6 @@ from sklearn import tree
 from sklearn import svm
 import logging as logger
 import re
-import graphviz
 import decimal
 import os
 
@@ -17,6 +16,7 @@ class Relation:
 
     def logic(self, expr):
         hypothesis = self.to_hypo(expr)
+        mk_assert = lambda a: '(assert %s)' % a
         def mk_declare(sym):
             return """
             (declare-const {0} Int)
@@ -33,7 +33,7 @@ class Relation:
         (get-model)
         """.format(**{
             'declare': '\n'.join(map(mk_declare, self.syms)),
-            'asserts': '\n'.join(map(lambda a: '(assert %s)' % a, self.asserts)),
+            'asserts': '\n'.join(map(mk_assert, self.asserts + [ self.goal ])),
             'prerel': hypothesis['prerel'],
             'postrel': hypothesis['postrel'],
         })
@@ -74,7 +74,8 @@ class Relation:
 
 
 class SimpleRelation(Relation):
-    def __init__(self):
+    def __init__(self, goal):
+        self.goal = goal
         self.start = { 'x': 1, 'y': 0 }
         self.start_logic = '(and (= x 1) (= y 0))' # TODO: when do we need this?
         self.asserts = [
@@ -86,6 +87,40 @@ class SimpleRelation(Relation):
     def script(self, *, x, y):
         return {
             'x': x + y,
+            'y': y + 1,
+        }
+
+
+class QuadraticRelation(Relation):
+    def __init__(self, goal):
+        self.goal = goal
+        self.start = { 'x': 0, 'y': 0 }
+        self.asserts = [
+            '(= xp (+ x 1))',
+            '(= yp (* (+ x 1) (+ x 1)))',
+        ]
+        self.setup()
+
+    def script(self, *, x, y):
+        return {
+            'x': x + 1,
+            'y': (x + 1)**2,
+        }
+
+
+class ModuloRelation(Relation):
+    def __init__(self, goal):
+        self.goal = goal
+        self.start = { 'x': 0, 'y': 0 }
+        self.asserts = [
+            '(= xp (+ x 2))',
+            '(= yp (+ y 1))',
+        ]
+        self.setup()
+
+    def script(self, *, x, y):
+        return {
+            'x': x + 2,
             'y': y + 1,
         }
 
@@ -112,7 +147,7 @@ def tree_to_z3(clf, syms):
                return (True, [[]]) # found a path to the +
            return (False, [[]])    # found a path to the -
 
-        lfound, lepxrs = step(children_left[idx])
+        lfound, lexprs = step(children_left[idx])
         rfound, rexprs = step(children_right[idx])
 
         decision = lambda d: '({dir} {var} {threshold})'.format(**{
@@ -122,26 +157,31 @@ def tree_to_z3(clf, syms):
         })
 
         if lfound and not rfound:
-            return (True, [ p + [decision('l')] for p in lepxrs ])
+            return (True, [ p + [decision('l')] for p in lexprs ])
 
         elif rfound and not lfound:
             return (True, [ p + [decision('r')] for p in rexprs ])
 
         elif rfound and lfound:
-            return (True, lexprs + rexprs)
+            return (True,
+                    [ p + [decision('l')] for p in lexprs ] +
+                    [ p + [decision('r')] for p in rexprs ])
 
         return (False, None)
 
-    paths = step(0)[1]
-    conj = list(map(lambda e: '(and {})'.format(' '.join(e)), paths))
-    disj = '(or {})'.format(' '.join(conj)) if len(conj) > 1 else conj[0]
+    def group(op, l):
+        l = list(l)
+        expr = ' '.join(l)
+        return '({0} {1})'.format(op, expr) if len(l) > 1 else expr
 
-    return disj
+    paths = step(0)[1]
+    return group('or', map(lambda e: group('and', e), paths))
 
 
 def visualize_2d(clf, X, y, title):
     import numpy as np
     import matplotlib.pyplot as plt
+    import graphviz
 
     h = 0.02
     X = np.array(X)
@@ -170,18 +210,28 @@ def visualize_2d(clf, X, y, title):
 
     plt.show()
 
+    dot = tree.export_graphviz(clf, out_file=None, feature_names=['x', 'y'],
+                               class_names=['-', '+'], filled=True, rounded=True,
+                               special_characters=True)
+    graph = graphviz.Source(dot)
+    graph.render("interpolant")
 
-def loop(relation, goal):
+
+def loop(relation):
     def to_lst(obj):
         return list(map(lambda a: a[1],
                         sorted(obj.items(), key=lambda a: a[0])))
 
     # get seed positive points
     positive_gen = relation.positive_points()
-    positives = [ to_lst(next(positive_gen)) ]
+    positives = [ to_lst(next(positive_gen)) for _ in range(10) ]
 
     # get an initial negative point (just try the goal)
-    negatives = [ to_lst(relation.negative_point(goal)) ]
+    goal = relation.goal
+    counterexample = relation.negative_point(goal)
+    if counterexample == 'unsat':
+        return (True, goal)
+    negatives = [ to_lst(counterexample) ]
 
     while True:
         logger.debug('hypothesis ' + goal)
@@ -208,25 +258,35 @@ def loop(relation, goal):
 
         if isinstance(counterexample, str):
             if counterexample == 'unsat':
-                return goal # no counterexamples, we're done!
+                return (True, goal) # no counterexamples, we're done!
             else:
-                raise 'unknown z3 exit line: ' + counterexample
+                raise Exception('unknown z3 exit line: ' + counterexample)
 
         # add counterexample to negative spots
         counterexample = to_lst(counterexample)
         if counterexample in negatives:
-            raise 'already seen counter-example %s no progress!' % str(counterexample)
+            raise Exception('already seen counter-example' + str(counterexample))
         negatives += [ counterexample ]
 
         # add some more positive stuff
         positives += [ to_lst(next(positive_gen)) ]
 
+        # check if goal is unsound
+        contradictions = [ n for n in negatives if n in positives ]
+        if len(contradictions) > 0:
+            return (False, contradictions) # return unsafe witness
+
 
 if 'DEBUG' in os.environ:
     logger.basicConfig(level=logger.DEBUG)
 
-interpolant = loop(SimpleRelation(), '(>= x y)')
-print('success', interpolant)
+# success, interpolant = loop(ModuloRelation('(= (mod x 2) 0)'))
+success, interpolant = loop(SimpleRelation('(>= x y)'))
+
+if success:
+    print('success', interpolant)
+else:
+    print('failure', interpolant)
 
 
 # N = [(0, 0), (1, -1), (3, -2), (4, -2), (7, -3), (8, -3), (12, -4), (13, -4), (14, -4), (15, -4)]
@@ -237,6 +297,3 @@ print('success', interpolant)
 # clf.fit(X, y)
 # visualize_2d(clf, X, y, 'first 10')
 # logger.debug(tree_to_z3(clf, ['x', 'y']))
-# dot = tree.export_graphviz(clf, out_file=None, feature_names=['x', 'y'], class_names=['-', '+'], filled=True, rounded=True, special_characters=True)
-# graph = graphviz.Source(dot)
-# graph.render("iris")
