@@ -1,0 +1,59 @@
+\begin{thebibliography}{10}
+
+\bibitem{under-over-approx}
+{\sc Albarghouthi, A., Gurfinkel, A., and Chechik, M.}
+\newblock Under-approximations to over-approximations and back.
+\newblock {\em TACAS\/} (2012).
+
+\bibitem{beautiful-interpolants}
+{\sc Albarghouthi, A., and McMillan, K.~L.}
+\newblock Beautiful interpolants.
+\newblock {\em CAV\/} (2013).
+
+\bibitem{do-good}
+{\sc Cook, B., Gotsman, A., Podelski, A., Rybalchenko, A., and Vardi, M.~Y.}
+\newblock Proving that programs eventually do something good.
+\newblock {\em POPL\/} (2007).
+
+\bibitem{program-termination}
+{\sc Cook, B., Podelski, A., and Rybalchenko, A.}
+\newblock Proving program termination.
+\newblock {\em ACM 54}, 5 (2011), 88--98.
+
+\bibitem{interpolant-strength}
+{\sc D'Silva, V., Kroening, D., Purandare, M., and Weissenbacher, G.}
+\newblock Interpolant strength.
+\newblock {\em VMCAI\/} (2010).
+
+\bibitem{github}
+{\sc Eden, M.}
+\newblock Non-linear chcs.
+\newblock \url{https://github.com/illegalprime/nonlinear-chcs}, 2018.
+
+\bibitem{lazy-interpolants}
+{\sc McMillan, K.~L.}
+\newblock Lazy abstraction with interpolants.
+\newblock {\em CAV\/} (2006).
+
+\bibitem{solving-horn-inter}
+{\sc McMillan, K.~L., and Rybalchenko, A.}
+\newblock Solving constrained horn clauses using interpolation.
+\newblock {\em Technical Report MSR-TR-2013-6\/} (2013).
+
+\bibitem{turing}
+{\sc Turing, A.}
+\newblock Checking a large routine.
+\newblock {\em Conference on High Speed automatic Calculating Machines\/}
+  (1949).
+
+\bibitem{harris}
+{\sc Zhou, Q., Heath, D., and Harris, W.}
+\newblock Completely automated equivalence proofs.
+\newblock {\em ACM\/} (2017).
+
+\bibitem{data-driven}
+{\sc Zhu, H., Magill, S., and Jagannathan, S.}
+\newblock Data-driven chc solver.
+\newblock {\em PLDI\/} (2018).
+
+\end{thebibliography}
