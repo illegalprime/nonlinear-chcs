@@ -2,6 +2,7 @@ from subprocess import run, PIPE
 from sexpdata import loads
 from sklearn import tree
 from sklearn import svm
+import numpy as np
 import logging as logger
 import re
 import decimal
@@ -60,6 +61,8 @@ Z3 = """
 ;;            generate positive examples until they surround counter (bad)
 ;;            start z3 off at trivial p so it can't get too smart too soon (bad)
 ;;            move examples from '-' to '+' when found (?)
+
+(assert (not (g {live-vars})))
 
 (check-sat)
 ;; if this system is true it'll produce a model which will refute our invariant
@@ -149,20 +152,56 @@ class SimpleRelation(Relation):
         }
 
 
-class QuadraticRelation(Relation):
+class ExponentialRelation(Relation):
     def __init__(self, goal):
         self.goal = goal
-        self.start = { 'x': 0, 'y': 0 }
+        self.start = { 'x': 1, 'y': 1 }
         self.loop = {
             'x': '(+ x 1)',
-            'y': '(* (+ x 1) (+ x 1))',
+            'y': '(+ y y)',
         }
         self.setup()
 
     def script(self, *, x, y):
         return {
             'x': x + 1,
-            'y': (x + 1)**2,
+            'y': y + y,
+        }
+
+
+class QuadraticRelation(Relation):
+    def __init__(self, goal):
+        self.goal = goal
+        self.start = { 'x': 1, 'y': 1, 'z': 1 }
+        self.loop = {
+            'x': '(+ x z)',
+            'y': '(+ y z 1)',
+            'z': '(+ z 1)',
+        }
+        self.setup()
+
+    def script(self, *, x, y, z):
+        return {
+            'x': x + z,
+            'y': y + z + 1,
+            'z': z + 1,
+        }
+
+
+class SimpleQuadRelation(Relation):
+    def __init__(self, goal):
+        self.goal = goal
+        self.start = { 'x': 1, 'y': 1 }
+        self.loop = {
+            'x': '(+ x 2)',
+            'y': '(+ y x)',
+        }
+        self.setup()
+
+    def script(self, *, x, y):
+        return {
+            'x': x + 2,
+            'y': y + x,
         }
 
 
@@ -180,6 +219,25 @@ class ModuloRelation(Relation):
         return {
             'x': x + 2,
             'y': y + 2,
+        }
+
+
+class WeirdRelation(Relation):
+    def __init__(self, goal):
+        self.goal = goal
+        self.start = { 'x': 1, 'y': 1, 'z': 1 }
+        self.loop = {
+            'x': '(+ x (* z z))',
+            'y': '(+ y (* z z) (- z) (- z))',
+            'z': '(+ z 1)',
+        }
+        self.setup()
+
+    def script(self, *, x, y, z):
+        return {
+            'x': x + z * z,
+            'y': y + z * z - z - z,
+            'z': z + 1,
         }
 
 
@@ -237,7 +295,6 @@ def tree_to_z3(clf, syms):
 
 
 def visualize_2d(clf, X, y, title):
-    import numpy as np
     import matplotlib.pyplot as plt
     import graphviz
 
@@ -275,13 +332,31 @@ def visualize_2d(clf, X, y, title):
     graph.render("interpolant")
 
 
+def visualize_3d(X, y, title):
+    from mpl_toolkits.mplot3d import Axes3D
+    import matplotlib.pyplot as plt
+    plt.clf()
+    fig = plt.figure(1, figsize=(800, 600))
+    ax = Axes3D(fig, elev=-150, azim=110)
+    ax.scatter(X[:, 0], X[:, 1], X[:, 2], c=y, cmap=plt.cm.Set1, edgecolor='k', s=40)
+    ax.set_title(title)
+    ax.set_xlabel("x")
+    ax.w_xaxis.set_ticklabels([])
+    ax.set_ylabel("y")
+    ax.w_yaxis.set_ticklabels([])
+    ax.set_zlabel("z")
+    ax.w_zaxis.set_ticklabels([])
+    plt.savefig('graph-3d.png', dpi=300)
+    plt.show()
+
+
 def loop(relation):
     def to_lst(obj):
         return list(map(lambda a: a[1],
                         sorted(obj.items(), key=lambda a: a[0])))
 
     # get seed positive points
-    interpolant = relation.goal
+    interpolant = 'true'
     positive_gen = relation.positive_points()
     positives = []
     negatives = []
@@ -292,8 +367,8 @@ def loop(relation):
             logger.debug('negatives ' + str(list(map(tuple, negatives))))
 
             # Gather data
-            y = [ 1 for _ in positives ] + [ -1 for _ in negatives ]
-            X = positives + negatives
+            y = np.array([ 1 for _ in positives ] + [ -1 for _ in negatives ])
+            X = np.array(positives + negatives)
 
             # Train a tree of linear separators (to get 100% accuracy)
             clf = tree.DecisionTreeClassifier()
@@ -303,7 +378,8 @@ def loop(relation):
             interpolant = tree_to_z3(clf, relation.syms)
 
             # Make a pretty graph
-            visualize_2d(clf, X, y, interpolant)
+            if X.shape[1] == 2: visualize_2d(clf, X, y, interpolant)
+            if X.shape[1] == 3: visualize_3d(     X, y, interpolant)
             if 'INTERACTIVE' in os.environ: input()
 
         # Give line to the oracle and to see if its correct
@@ -324,8 +400,13 @@ def loop(relation):
 
         # add some more positive stuff
         positives += [ to_lst(next(positive_gen)) ]
+        logger.debug('positives {}'.format(positives))
 
-        # check if goal is unsound
+        # TODO: if we just generated a '+' that used to be a '-', remove it
+        # negatives = [ n for n in negatives if n not in positives ]
+        logger.debug('negatives {}'.format(negatives))
+
+        # TODO: # check if goal is unsound
         contradictions = [ n for n in negatives if n in positives ]
         if len(contradictions) > 0:
             return (False, contradictions) # return unsafe witness
@@ -336,26 +417,11 @@ if __name__ == '__main__':
     if 'DEBUG' in os.environ:
         logger.basicConfig(level=logger.DEBUG)
 
-    class WeirdRelation(Relation):
-        def __init__(self, goal):
-            self.goal = goal
-            self.start = { 'x': 0, 'y': 1 }
-            self.loop = {
-                'x': 'y',
-                'y': '(+ x y)'
-            }
-            self.setup()
-
-        def script(self, *, x, y):
-            return {
-                'x': y,
-                'y': y + x,
-            }
-
-    success, interpolant = loop(ModuloRelation('(not (= x 3))'))
+    # success, interpolant = loop(ModuloRelation('(not (= x 3))'))
     # success, interpolant = loop(SimpleRelation('(>= x y)'))
-    # success, interpolant = loop(QuadraticRelation('(= y (* x x))'))
-    # success, interpolant = loop(WeirdRelation('(>= y x)'))
+    # success, interpolant = loop(QuadraticRelation('(>= y x)'))
+    # success, interpolant = loop(WeirdRelation('(>= (+ y (* z z)) x)'))
+    success, interpolant = loop(SimpleQuadRelation('(>= y x)'))
 
     if success:
         print('success', interpolant)
